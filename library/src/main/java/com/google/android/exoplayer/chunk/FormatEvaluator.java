@@ -15,10 +15,13 @@
  */
 package com.google.android.exoplayer.chunk;
 
+
+import android.os.Handler;
 import android.util.Log;
 
 import com.google.android.exoplayer.upstream.BandwidthMeter;
 
+import java.util.HashMap;
 import java.util.List;
 import java.util.Random;
 
@@ -180,15 +183,31 @@ public interface FormatEvaluator {
     private final long maxDurationForQualityDecreaseUs;
     private final long minDurationToRetainAfterDiscardUs;
     private final float bandwidthFraction;
+    
+    private long videoDurationUs;
+    private final Handler eventHandler;
+    private final EventListener eventListener;
+    private HashMap<Long, Long> chunksByte;
+    private boolean allChunksLoaded;
+    
+    
+    public interface EventListener {
+      void onAllChunksDownloaded(long totalBytes);
+    }
 
     /**
      * @param bandwidthMeter Provides an estimate of the currently available bandwidth.
      */
-    public AdaptiveEvaluator(BandwidthMeter bandwidthMeter) {
+    public AdaptiveEvaluator(BandwidthMeter bandwidthMeter,long videoDurationMs, Handler eventHandler, EventListener eventListener) {
       this (bandwidthMeter, DEFAULT_MAX_INITIAL_BITRATE,
-          DEFAULT_MIN_DURATION_FOR_QUALITY_INCREASE_MS,
-          DEFAULT_MAX_DURATION_FOR_QUALITY_DECREASE_MS,
-          DEFAULT_MIN_DURATION_TO_RETAIN_AFTER_DISCARD_MS, DEFAULT_BANDWIDTH_FRACTION);
+        DEFAULT_MIN_DURATION_FOR_QUALITY_INCREASE_MS,
+        DEFAULT_MAX_DURATION_FOR_QUALITY_DECREASE_MS,
+        DEFAULT_MIN_DURATION_TO_RETAIN_AFTER_DISCARD_MS, DEFAULT_BANDWIDTH_FRACTION, eventHandler, eventListener);
+      this.videoDurationUs=videoDurationMs*1000;
+      this.chunksByte= new HashMap<Long, Long>();
+      this.allChunksLoaded=false;
+      
+      
     }
 
     /**
@@ -212,7 +231,11 @@ public interface FormatEvaluator {
         int minDurationForQualityIncreaseMs,
         int maxDurationForQualityDecreaseMs,
         int minDurationToRetainAfterDiscardMs,
-        float bandwidthFraction) {
+        float bandwidthFraction, 
+        Handler eventHandler, 
+        EventListener eventListener) {
+      this.eventHandler=eventHandler;
+      this.eventListener=eventListener;
       this.bandwidthMeter = bandwidthMeter;
       this.maxInitialBitrate = maxInitialBitrate;
       this.minDurationForQualityIncreaseUs = minDurationForQualityIncreaseMs * 1000L;
@@ -236,6 +259,29 @@ public interface FormatEvaluator {
         Format[] formats, Evaluation evaluation) {
       long bufferedDurationUs = queue.isEmpty() ? 0
           : queue.get(queue.size() - 1).endTimeUs - playbackPositionUs;
+      
+      long bufferedEndTimeUs = queue.isEmpty() ? 0
+          : queue.get(queue.size() - 1).endTimeUs;
+      
+      for(int i=0;i<queue.size();i++){
+        if(!chunksByte.containsKey(queue.get(i).startTimeUs)){
+          chunksByte.put(queue.get(i).startTimeUs, queue.get(i).bytesLoaded());
+        } 
+      }
+
+      
+      if (videoDurationUs-bufferedEndTimeUs<500000){
+        if(!allChunksLoaded){
+          long totalBytes=0;
+          for(long chunk_key: chunksByte.keySet()){
+            totalBytes+=chunksByte.get(chunk_key);
+          }
+          reportTotalBytes(totalBytes);
+        }
+        allChunksLoaded=true;
+      }
+      
+      
       Format current = evaluation.format;
       Format ideal = determineIdealFormat(formats, bandwidthMeter.getBitrateEstimate());
       boolean isHigher = ideal != null && current != null && ideal.bitrate > current.bitrate;
@@ -298,6 +344,17 @@ public interface FormatEvaluator {
       return bitrateEstimate == BandwidthMeter.NO_ESTIMATE
           ? maxInitialBitrate : (long) (bitrateEstimate * bandwidthFraction);
     }
+    
+    private void reportTotalBytes(final long totalBytes){
+      if (eventHandler != null && eventListener != null) {
+        eventHandler.post(new Runnable()  {
+          @Override
+          public void run() {
+            eventListener.onAllChunksDownloaded(totalBytes);
+          }
+        });
+      }
+    }
 
   }
   
@@ -321,15 +378,28 @@ public interface FormatEvaluator {
     //buffer occupancy starts decreasing, but it should not trigger f function to reduce
     // bandwidth
     private long videoDurationUs;
+    private long startTime;
+    private final Handler eventHandler;
+    private final EventListener eventListener;
+    private HashMap<Long, Long> chunksByte;
+    private boolean allChunksLoaded;
     
     
-    
+    public interface EventListener {
+      void onSwitchToSteadyState(long elapsedMs);
+      void onAllChunksDownloaded(long totalBytes);
+    }
       
-    public BufferBasedAdaptiveEvaluator(BandwidthMeter bandwidthMeter, long videoDurationMs){
+    public BufferBasedAdaptiveEvaluator(BandwidthMeter bandwidthMeter, long videoDurationMs, Handler eventHandler, EventListener eventListener){
         this.bufferState=BufferState.STARTUP_STATE;
         this.bandwidthMeter=bandwidthMeter;
         this.prevBufferDurationUs=-1;
         this.videoDurationUs=videoDurationMs*1000;
+        this.startTime=System.currentTimeMillis();
+        this.eventHandler=eventHandler;
+        this.eventListener=eventListener;
+        this.chunksByte= new HashMap<Long, Long>();
+        this.allChunksLoaded=false;
     }
       
     @Override
@@ -351,7 +421,11 @@ public interface FormatEvaluator {
         
         
         for(int i=0;i<queue.size();i++){
-            Log.e("ashkan_video", "\t"+i+": "+queue.get(i).format.bitrate+" "+queue.get(i).startTimeUs/1000+" : "+queue.get(i).endTimeUs/1000+" "+queue.get(i).isLoadFinished());
+//            Log.e("ashkan_video", "\t"+i+": "+queue.get(i).format.bitrate+" "+queue.get(i).startTimeUs/1000+" : "+queue.get(i).endTimeUs/1000+" "+queue.get(i).isLoadFinished());
+          
+          if(!chunksByte.containsKey(queue.get(i).startTimeUs)){
+            chunksByte.put(queue.get(i).startTimeUs, queue.get(i).bytesLoaded());
+          } 
         }
         
         
@@ -370,18 +444,28 @@ public interface FormatEvaluator {
             if(prevBufferDurationUs!=-1 && prevBufferDurationUs>bufferedDurationUs){
                 bufferState=BufferState.STEADY_STATE;
                 Log.e("ashkan_video", "switch to STEADY_STATE, prev: "+prevBufferDurationUs/1000);
+                notifyStateChanged(System.currentTimeMillis()-startTime);
             }
             else if(determineBufferBasedIdealFormat(formats, current, bufferedDurationUs).bitrate>determineCapacityBasedIdealFormat(formats, current, bufferedDurationUs).bitrate){
                 bufferState=BufferState.STEADY_STATE;
                 Log.e("ashkan_video", "switch to STEADY_STATE");
+                notifyStateChanged(System.currentTimeMillis()-startTime);
             }
         }
         prevBufferDurationUs=bufferedDurationUs;
-        Log.e("ashkan_video", "buffer endtime: "+(bufferedEndTimeUs/1000)+" video end time: "+(videoDurationUs/1000));
+//        Log.e("ashkan_video", "buffer endtime: "+(bufferedEndTimeUs/1000)+" video end time: "+(videoDurationUs/1000));
         
         if (videoDurationUs-bufferedEndTimeUs<500000){
             ideal=current;
-            Log.e("ashkan_video", "We have all the video in buffer!");
+            if(!allChunksLoaded){
+              long totalBytes=0;
+              for(long chunk_key: chunksByte.keySet()){
+                totalBytes+=chunksByte.get(chunk_key);
+              }
+              reportTotalBytes(totalBytes);
+            }
+            allChunksLoaded=true;
+//            Log.e("ashkan_video", "We have all the video in buffer!");
         }else{
             if(bufferState==BufferState.STARTUP_STATE){
                 ideal = determineCapacityBasedIdealFormat(formats, current, bufferedDurationUs);
@@ -450,6 +534,28 @@ public interface FormatEvaluator {
             return 8;
         }
     }
+    private void notifyStateChanged(final long elapsedTimeMs){
+      if (eventHandler != null && eventListener != null) {
+        eventHandler.post(new Runnable()  {
+          @Override
+          public void run() {
+            eventListener.onSwitchToSteadyState(elapsedTimeMs);
+          }
+        });
+      }
+    }
+    
+    private void reportTotalBytes(final long totalBytes){
+      if (eventHandler != null && eventListener != null) {
+        eventHandler.post(new Runnable()  {
+          @Override
+          public void run() {
+            eventListener.onAllChunksDownloaded(totalBytes);
+          }
+        });
+      }
+    }
+    
   }
 
 
