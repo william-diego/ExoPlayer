@@ -518,7 +518,6 @@ public interface FormatEvaluator {
             return 0;
         }else{
             float bufferDurationIntervalUs=((DEFAULT_BUFFER_DURATION_MS-DEFAULT_RESERVOIR_DURATION_MS)/(formatsLen-1))*1000;
-            Log.e("ashkan_video", "index: "+(formatsLen-2-((int)((bufferedDurationUs-(DEFAULT_RESERVOIR_DURATION_MS*1000))/bufferDurationIntervalUs))));
             
             return formatsLen-2-(int)((bufferedDurationUs-(DEFAULT_RESERVOIR_DURATION_MS*1000))/bufferDurationIntervalUs);
         }
